@@ -17,8 +17,10 @@ The script is `scripts/transcribe.py` in this skill's directory. In Claude Code 
 Pass every URL and file path the user gave (expand folders and globs to media files yourself):
 
 ```bash
-"${CLAUDE_SKILL_DIR}/scripts/transcribe.py" -o transcripts <url-or-file> ...
+${CLAUDE_SKILL_DIR}/scripts/transcribe.py -o transcripts <url-or-file> ...
 ```
+
+Run it exactly in this form, with the script path unquoted and first: that is the form the skill pre-approves.
 
 - Output directory: the user's choice, else `./transcripts`.
 - `--lang <code>` when the user states the spoken language; the default `auto` detects it.

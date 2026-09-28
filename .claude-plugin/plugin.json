@@ -1,0 +1,12 @@
+{
+  "name": "transcribe",
+  "version": "0.1.0",
+  "description": "Transcribe videos and audio locally (human subtitles when available, whisper.cpp otherwise) so Claude can summarise them.",
+  "author": {
+    "name": "david"
+  },
+  "homepage": "https://github.com/holarchic/transcribe",
+  "repository": "https://github.com/holarchic/transcribe",
+  "license": "MIT",
+  "keywords": ["transcription", "whisper", "whisper.cpp", "yt-dlp", "youtube", "podcast", "video"]
+}

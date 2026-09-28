@@ -1,0 +1,14 @@
+{
+  "name": "transcribe",
+  "description": "The transcribe skill: local video and audio transcription for Claude Code.",
+  "owner": {
+    "name": "david"
+  },
+  "plugins": [
+    {
+      "name": "transcribe",
+      "source": "./",
+      "description": "Transcribe videos and audio locally (human subtitles when available, whisper.cpp otherwise) so Claude can summarise them."
+    }
+  ]
+}
