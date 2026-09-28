@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.DS_Store
+.ruff_cache/
+transcripts/
+*.part
