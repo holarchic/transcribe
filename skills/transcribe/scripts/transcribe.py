@@ -210,9 +210,13 @@ def as_text(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+# Every yt-dlp call: ignore the user's config (it can add outputs or post-processing),
+# never expand playlists, keep stderr to real errors.
+YT_DLP = ("yt-dlp", "--ignore-config", "--no-playlist", "--no-warnings")
+
+
 def probe_url(url: str) -> Meta:
-    proc = run(["yt-dlp", "--ignore-config", "-J", "--flat-playlist", "--no-playlist",
-                "--no-warnings", url])
+    proc = run([*YT_DLP, "-J", "--flat-playlist", url])
     try:
         info = json.loads(proc.stdout)
     except json.JSONDecodeError as e:
@@ -285,15 +289,14 @@ def only_artifact(tmp: Path, pattern: str, producer: str) -> Path:
 
 
 def fetch_subtitles(url: str, lang: str, tmp: Path) -> str:
-    run(["yt-dlp", "--ignore-config", "--skip-download", "--write-subs", "--sub-langs", lang,
-         "--convert-subs", "srt", "--no-playlist", "--no-warnings", "-o", str(tmp / "sub"), url])
+    run([*YT_DLP, "--skip-download", "--write-subs", "--sub-langs", lang,
+         "--convert-subs", "srt", "-o", str(tmp / "sub"), url])
     return only_artifact(tmp, "sub*.srt", "yt-dlp").read_text(encoding="utf-8", errors="replace")
 
 
 def fetch_audio(url: str, tmp: Path) -> Path:
     # Named source.*, never audio.*: a WAV download would collide with the conversion target.
-    run(["yt-dlp", "--ignore-config", "-f", "bestaudio/best", "--no-playlist", "--no-warnings",
-         "-o", str(tmp / "source.%(ext)s"), url])
+    run([*YT_DLP, "-f", "bestaudio/best", "-o", str(tmp / "source.%(ext)s"), url])
     return only_artifact(tmp, "source.*", "yt-dlp")
 
 
@@ -345,28 +348,26 @@ def parse_srt(text: str) -> list[Cue]:
     """Parse SRT by position, not by blank lines or arrows alone.
 
     ffmpeg-converted subtitles can hold blank lines inside a cue, and dialogue can contain
-    "-->" or be a bare number. So: an index is a number at the start of a block whose next
-    line has an arrow; after an index the timing line must be valid; elsewhere only a fully
-    valid timing line opens a cue, and every other line is cue text.
+    "-->" or be a bare number. So only a fully valid timing line opens a cue; a number is
+    an index only at the start of a block with a valid timing line right after it; every
+    other line is cue text. Text before the first cue means the input is not SRT.
     """
     lines = text.lstrip("﻿").replace("\r\n", "\n").split("\n")
     cues: list[Cue] = []
     current: Cue | None = None
     body: list[str] = []
-    block_start, expect_timing = True, False
+    block_start = True
     for i, line in enumerate(lines):
         stripped = line.strip()
         if not stripped:
             block_start = True
             continue
-        timing = _timing(line)
-        next_has_arrow = i + 1 < len(lines) and "-->" in lines[i + 1]
-        if expect_timing and timing is None:
-            raise InputError(f"malformed subtitles: bad timing line {stripped[:40]!r}")
-        if block_start and not expect_timing and stripped.isdigit() and next_has_arrow:
-            expect_timing, block_start = True, False
+        is_index = (block_start and stripped.isdigit()
+                    and i + 1 < len(lines) and _timing(lines[i + 1]) is not None)
+        block_start = False
+        if is_index:
             continue
-        block_start, expect_timing = False, False
+        timing = _timing(line)
         if timing is not None:
             _append_cue(cues, current, body)
             current, body = timing, []
@@ -375,16 +376,19 @@ def parse_srt(text: str) -> list[Cue]:
             raise InputError(f"malformed subtitles: {kind} {stripped[:40]!r}")
         else:
             body.append(line)
-    if expect_timing:
-        raise InputError("malformed subtitles: index without a timing line")
     _append_cue(cues, current, body)
     return cues
+
+
+# Formatting tags that SRT (and ffmpeg's SRT/VTT conversions) carry; other angle-bracket
+# text, e.g. "x < 5 and y > 3", is dialogue.
+_FORMAT_TAG = re.compile(r"</?(?:i|b|u|s|font|c|v|lang|ruby|rt)(?:[\s.][^<>]*)?>", re.IGNORECASE)
 
 
 def _append_cue(cues: list[Cue], timing: Cue | None, body: list[str]) -> None:
     if timing is None:
         return
-    text = " ".join(re.sub(r"<[^>]+>", "", " ".join(body)).split())
+    text = " ".join(_FORMAT_TAG.sub("", " ".join(body)).split())
     if text:
         cues.append(Cue(timing.start, timing.end, text))
 

@@ -35,6 +35,12 @@ FFMPEG_ASS_SRT = ('1\n00:00:01,000 --> 00:00:02,500\n<font size="20">First\n\nSe
 FFMPEG_ARROW_SRT = ("1\n00:00:01,000 --> 00:00:02,000\nprice goes A --> B\n\n"
                     "2\n00:00:03,000 --> 00:00:04,000\n2026\n\n"
                     "3\n00:00:05,000 --> 00:00:06,000\nlast\n\n")
+# Verbatim ffmpeg 8.1 output for an ASS cue "First\N\N2026\NA --> B".
+FFMPEG_ASS_NUMERIC_SRT = ('1\n00:00:01,000 --> 00:00:02,500\n'
+                          '<font size="20">First\n\n2026\nA --> B</font>\n\n')
+# Verbatim ffmpeg 8.1 SRT->SRT output: comparison operators next to real formatting tags.
+FFMPEG_COMPARISON_SRT = ("1\n00:00:01,000 --> 00:00:02,000\nif x < 5 and y > 3\n\n"
+                         "2\n00:00:03,000 --> 00:00:04,000\n<i>styled</i> <b>text</b>\n\n")
 
 
 @dataclass(frozen=True)
@@ -117,13 +123,21 @@ class Units(unittest.TestCase):
         self.assertEqual([c.text for c in tx.parse_srt(unindexed)], ["2026", "next"])
         bare_arrow = "1\n00:00:01,000 --> 00:00:02,000\nA --> B\n"
         self.assertEqual([c.text for c in tx.parse_srt(bare_arrow)], ["A --> B"])
+        self.assertEqual([c.text for c in tx.parse_srt(FFMPEG_ASS_NUMERIC_SRT)],
+                         ["First 2026 A --> B"])
+
+    def test_parse_srt_strips_only_formatting_tags(self):
+        self.assertEqual([c.text for c in tx.parse_srt(FFMPEG_COMPARISON_SRT)],
+                         ["if x < 5 and y > 3", "styled text"])
+        vtt_style = "1\n00:00:01,000 --> 00:00:02,000\n<c.yellow>hi</c> <v Bob>there</v>\n"
+        self.assertEqual([c.text for c in tx.parse_srt(vtt_style)], ["hi there"])
 
     def test_parse_srt_rejects_malformed(self):
         for text, reason in [("this is not\nan srt file\n", "before the first timing line"),
-                             ("1\nfoo --> bar\ntext\n", "bad timing line"),
+                             ("1\nfoo --> bar\ntext\n", "malformed subtitles"),
                              ("stray\n1\n00:00:01,000 --> 00:00:02,000\nx\n", "before the first"),
-                             ("1\n00:00:61,000 --> 00:01:30,000\nx\n", "bad timing line"),
-                             ("1\n00:00:05,000 --> 00:00:01,000\nx\n", "bad timing line"),
+                             ("1\n00:00:61,000 --> 00:01:30,000\nx\n", "malformed subtitles"),
+                             ("1\n00:00:05,000 --> 00:00:01,000\nx\n", "malformed subtitles"),
                              ("foo --> bar\nx\n", "bad timing line")]:
             with self.subTest(text=text), self.assertRaisesRegex(tx.InputError, reason):
                 tx.parse_srt(text)
