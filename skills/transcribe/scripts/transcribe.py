@@ -92,13 +92,26 @@ def install_hint(tool: str) -> str:
     return INSTALL_HINTS[tool][platform]
 
 
+_SECRET_PARAM = re.compile(
+    r"([?&](?:[\w.-]*(?:token|key|sig|signature|secret|password|passwd|auth|credential)[\w.-]*"
+    r"|x-amz-[\w-]+)=)[^&#\s]*",
+    re.IGNORECASE,
+)
+
+
 def redact(text: str) -> str:
-    """Hide credentials embedded in URLs (scheme://user:pass@host)."""
-    return re.sub(r"([a-z][a-z0-9+.-]*://)[^/\s@]+@", r"\1***@", text, flags=re.IGNORECASE)
+    """Hide URL credentials (scheme://user:pass@host) and secret-looking query parameters."""
+    text = re.sub(r"([a-z][a-z0-9+.-]*://)[^/\s@]+@", r"\1***@", text, flags=re.IGNORECASE)
+    return _SECRET_PARAM.sub(r"\1***", text)
 
 
-def progress(tag: str, stage: str, stem: str) -> None:
-    print(f"{tag} {stage} {stem}", file=sys.stderr)
+def log(message: str) -> None:
+    """The one diagnostic sink: stderr, so stdout carries only result lines."""
+    print(message, file=sys.stderr)
+
+
+def progress(index: int, total: int, stage: str, stem: str) -> None:
+    log(f"[{index}/{total}] {stage} {stem}")
 
 
 def run(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -166,7 +179,7 @@ def download_model(name: str, dest: Path) -> None:
         raise PreflightError(f"model {name} is not cached and curl is missing: {hint}")
     url = MODEL_URL.format(name=name)
     part = dest.with_name(dest.name + ".part")
-    print(f"downloading model {name} (one-time) to {dest}", file=sys.stderr)
+    log(f"downloading model {name} (one-time) to {dest}")
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         cmd = ["curl", "-fL", "--retry", "3", "-#", "-o", str(part), url]
@@ -188,7 +201,7 @@ def remove_quietly(path: Path) -> None:
 def as_duration(value: object) -> float | None:
     try:
         seconds = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return seconds if math.isfinite(seconds) and seconds >= 0 else None
 
@@ -303,42 +316,77 @@ def transcribe_wav(wav: Path, model: Path, lang: str, tmp: Path) -> str:
     return srt.read_text(encoding="utf-8", errors="replace")
 
 
-_TS = r"\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}"
-_TIMING = re.compile(rf"^\s*({_TS})\s*-->\s*({_TS})(\s.*)?$")
-_TIMING_SHAPE = re.compile(r"^\s*\S+\s*-->\s*\S+")
+_TIMESTAMP = re.compile(r"^(\d{1,2}):(\d{2}):(\d{2})[,.](\d{1,3})$")
+_ARROW = re.compile(r"^\s*(\S+)\s*-->\s*(\S+)(?:\s.*)?$")
+
+
+def _seconds(stamp: str) -> float | None:
+    match = _TIMESTAMP.match(stamp)
+    if match is None:
+        return None
+    hours, minutes, secs, millis = match.groups()
+    if int(minutes) > 59 or int(secs) > 59:
+        return None
+    return int(hours) * 3600 + int(minutes) * 60 + int(secs) + int(millis.ljust(3, "0")) / 1000
+
+
+def _timing(line: str) -> Cue | None:
+    """The line as an empty-bodied Cue if it is a valid timing line, else None."""
+    arrow = _ARROW.match(line)
+    if arrow is None:
+        return None
+    start, end = _seconds(arrow.group(1)), _seconds(arrow.group(2))
+    if start is None or end is None or end < start:
+        return None
+    return Cue(arrow.group(1), arrow.group(2), "")
 
 
 def parse_srt(text: str) -> list[Cue]:
-    """Cue boundaries are timing lines, not blank lines: ffmpeg-converted subtitles can
-    carry blank lines inside a cue. A bare number right before a timing line is an index."""
+    """Parse SRT by position, not by blank lines or arrows alone.
+
+    ffmpeg-converted subtitles can hold blank lines inside a cue, and dialogue can contain
+    "-->" or be a bare number. So: an index is a number at the start of a block whose next
+    line has an arrow; after an index the timing line must be valid; elsewhere only a fully
+    valid timing line opens a cue, and every other line is cue text.
+    """
+    lines = text.lstrip("﻿").replace("\r\n", "\n").split("\n")
     cues: list[Cue] = []
-    start = end = None
+    current: Cue | None = None
     body: list[str] = []
-    for line in text.lstrip("﻿").replace("\r\n", "\n").split("\n"):
-        if _TIMING_SHAPE.match(line):
-            timing = _TIMING.match(line)
-            if timing is None:
-                raise InputError(f"malformed subtitles: bad timing line {line.strip()[:40]!r}")
-            if body and body[-1].strip().isdigit():
-                body.pop()
-            if start is None and body:
-                raise InputError("malformed subtitles: text before the first timing line")
-            _append_cue(cues, start, end, body)
-            start, end, body = timing.group(1), timing.group(2), []
-        elif line.strip():
+    block_start, expect_timing = True, False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            block_start = True
+            continue
+        timing = _timing(line)
+        next_has_arrow = i + 1 < len(lines) and "-->" in lines[i + 1]
+        if expect_timing and timing is None:
+            raise InputError(f"malformed subtitles: bad timing line {stripped[:40]!r}")
+        if block_start and not expect_timing and stripped.isdigit() and next_has_arrow:
+            expect_timing, block_start = True, False
+            continue
+        block_start, expect_timing = False, False
+        if timing is not None:
+            _append_cue(cues, current, body)
+            current, body = timing, []
+        elif current is None:
+            kind = "bad timing line" if "-->" in stripped else "text before the first timing line"
+            raise InputError(f"malformed subtitles: {kind} {stripped[:40]!r}")
+        else:
             body.append(line)
-    if start is None and body:
-        raise InputError("malformed subtitles: no timing lines")
-    _append_cue(cues, start, end, body)
+    if expect_timing:
+        raise InputError("malformed subtitles: index without a timing line")
+    _append_cue(cues, current, body)
     return cues
 
 
-def _append_cue(cues: list[Cue], start: str | None, end: str | None, body: list[str]) -> None:
-    if start is None or end is None:
+def _append_cue(cues: list[Cue], timing: Cue | None, body: list[str]) -> None:
+    if timing is None:
         return
     text = " ".join(re.sub(r"<[^>]+>", "", " ".join(body)).split())
     if text:
-        cues.append(Cue(start, end, text))
+        cues.append(Cue(timing.start, timing.end, text))
 
 
 def cue_lines(cues: list[Cue]) -> list[str]:
@@ -373,8 +421,10 @@ def render_txt(meta: Meta, prov: Provenance, lines: list[str]) -> str:
 
 
 def format_result(result: Result) -> str:
+    """One line, three tab-separated fields; tabs and newlines inside a field become spaces."""
     detail = str(result.txt_path) if result.txt_path else (result.error or "")
-    return f"{result.status}\t{format_provenance(result.provenance)}\t{detail}"
+    fields = [result.status, format_provenance(result.provenance), redact(detail)]
+    return "\t".join(re.sub(r"[\t\r\n]+", " ", field) for field in fields)
 
 
 def publish(out: Path, stem: str, srt: str, txt: str) -> None:
@@ -395,37 +445,45 @@ def publish(out: Path, stem: str, srt: str, txt: str) -> None:
         remove_quietly(txt_tmp)
 
 
-def process(source: Source, args: argparse.Namespace, model: Path, tag: str) -> Result:
+@dataclass(frozen=True)
+class Options:
+    out: Path
+    lang: str
+    force: bool
+    model: Path
+
+
+def process(source: Source, opts: Options, index: int, total: int) -> Result:
     try:
-        return _process(source, args, model, tag)
+        return _process(source, opts, index, total)
     except OSError as e:
         raise InputError(f"filesystem error: {e}") from e
 
 
-def _process(source: Source, args: argparse.Namespace, model: Path, tag: str) -> Result:
+def _process(source: Source, opts: Options, index: int, total: int) -> Result:
     is_url = source.kind == "url"
     meta = probe_url(source.raw) if is_url else probe_file(Path(source.raw).expanduser().resolve())
     stem = stem_for(meta)
-    txt_path = args.out / f"{stem}.txt"
-    if txt_path.exists() and not args.force:
+    txt_path = opts.out / f"{stem}.txt"
+    if txt_path.exists() and not opts.force:
         return Result(source.raw, "SKIP", txt_path=txt_path)
     with tempfile.TemporaryDirectory(prefix="transcribe-") as tmp_name:
         tmp = Path(tmp_name)
-        lang = pick_subtitle_lang(meta, args.lang) if is_url else None
+        lang = pick_subtitle_lang(meta, opts.lang) if is_url else None
         if lang:
-            progress(tag, f"subtitles:{lang}", stem)
+            progress(index, total, f"subtitles:{lang}", stem)
             srt, prov = fetch_subtitles(source.raw, lang, tmp), Provenance("subtitles", lang)
         else:
             if is_url:
-                progress(tag, "download", stem)
+                progress(index, total, "download", stem)
             media = fetch_audio(source.raw, tmp) if is_url else Path(meta.source)
-            progress(tag, "whisper", stem)
-            srt = transcribe_wav(to_wav(media, tmp), model, args.lang, tmp)
-            prov = Provenance("whisper", model.stem.replace("ggml-", "", 1))
+            progress(index, total, "whisper", stem)
+            srt = transcribe_wav(to_wav(media, tmp), opts.model, opts.lang, tmp)
+            prov = Provenance("whisper", opts.model.stem.replace("ggml-", "", 1))
     lines = cue_lines(parse_srt(srt))
     if not lines:
         raise InputError("empty transcript (no speech detected)")
-    publish(args.out, stem, srt, render_txt(meta, prov, lines))
+    publish(opts.out, stem, srt, render_txt(meta, prov, lines))
     return Result(source.raw, "OK", provenance=prov, txt_path=txt_path)
 
 
@@ -454,20 +512,21 @@ def main(argv: list[str]) -> int:
     try:
         args.out.mkdir(parents=True, exist_ok=True)
     except OSError as e:
-        print(f"transcribe: cannot create output directory: {e}", file=sys.stderr)
+        log(f"transcribe: cannot create output directory: {e}")
         return 2
     try:
         model = preflight([i for i in items if isinstance(i, Source)], args.model)
     except PreflightError as e:
-        print(f"transcribe: {e}", file=sys.stderr)
+        log(f"transcribe: {e}")
         return 2
+    opts = Options(out=args.out, lang=args.lang, force=args.force, model=model)
     results = []
     for n, item in enumerate(items, 1):
         if isinstance(item, Result):
             results.append(item)
             continue
         try:
-            results.append(process(item, args, model, f"[{n}/{len(items)}]"))
+            results.append(process(item, opts, n, len(items)))
         except InputError as e:
             results.append(Result(item.raw, "FAIL", error=str(e)))
     for result in results:

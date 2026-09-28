@@ -31,6 +31,10 @@ STEM = re.compile(r"^[a-z0-9-]*[0-9a-f]{8}$")
 # Verbatim ffmpeg 8.1 output for an ASS cue "First\N\NSecond": a blank line inside a cue.
 FFMPEG_ASS_SRT = ('1\n00:00:01,000 --> 00:00:02,500\n<font size="20">First\n\nSecond</font>\n\n'
                   '2\n00:00:03,000 --> 00:00:04,000\n<font size="20">Third line</font>\n\n')
+# Verbatim ffmpeg 8.1 SRT->SRT output: dialogue containing an arrow and a bare number.
+FFMPEG_ARROW_SRT = ("1\n00:00:01,000 --> 00:00:02,000\nprice goes A --> B\n\n"
+                    "2\n00:00:03,000 --> 00:00:04,000\n2026\n\n"
+                    "3\n00:00:05,000 --> 00:00:06,000\nlast\n\n")
 
 
 @dataclass(frozen=True)
@@ -106,10 +110,21 @@ class Units(unittest.TestCase):
         cues = tx.parse_srt(FFMPEG_ASS_SRT)
         self.assertEqual([c.text for c in cues], ["First Second", "Third line"])
 
+    def test_parse_srt_keeps_arrows_and_numbers_in_dialogue(self):
+        self.assertEqual([c.text for c in tx.parse_srt(FFMPEG_ARROW_SRT)],
+                         ["price goes A --> B", "2026", "last"])
+        unindexed = "00:00:01,000 --> 00:00:02,000\n2026\n00:00:03,000 --> 00:00:04,000\nnext\n"
+        self.assertEqual([c.text for c in tx.parse_srt(unindexed)], ["2026", "next"])
+        bare_arrow = "1\n00:00:01,000 --> 00:00:02,000\nA --> B\n"
+        self.assertEqual([c.text for c in tx.parse_srt(bare_arrow)], ["A --> B"])
+
     def test_parse_srt_rejects_malformed(self):
-        for text, reason in [("this is not\nan srt file\n", "no timing lines"),
+        for text, reason in [("this is not\nan srt file\n", "before the first timing line"),
                              ("1\nfoo --> bar\ntext\n", "bad timing line"),
-                             ("stray\n1\n00:00:01,000 --> 00:00:02,000\nx\n", "before the first")]:
+                             ("stray\n1\n00:00:01,000 --> 00:00:02,000\nx\n", "before the first"),
+                             ("1\n00:00:61,000 --> 00:01:30,000\nx\n", "bad timing line"),
+                             ("1\n00:00:05,000 --> 00:00:01,000\nx\n", "bad timing line"),
+                             ("foo --> bar\nx\n", "bad timing line")]:
             with self.subTest(text=text), self.assertRaisesRegex(tx.InputError, reason):
                 tx.parse_srt(text)
 
@@ -131,6 +146,8 @@ class Units(unittest.TestCase):
     def test_redact(self):
         self.assertEqual(tx.redact("GET https://user:pw@host.test/x failed"),
                          "GET https://***@host.test/x failed")
+        self.assertEqual(tx.redact("https://h.test/v.mp3?token=SECRET&id=7&X-Amz-Signature=ab"),
+                         "https://h.test/v.mp3?token=***&id=7&X-Amz-Signature=***")
         self.assertEqual(tx.redact(URL), URL)
         prov = tx.Provenance("whisper", "m")
         creds = tx.render_txt(meta(source="https://u:p@h.test/v"), prov, [])
@@ -138,8 +155,13 @@ class Units(unittest.TestCase):
 
     def test_as_duration(self):
         self.assertEqual(tx.as_duration("11.0"), 11.0)
-        for bad in ("NaN", "inf", -1, None, "x", [1]):
+        for bad in ("NaN", "inf", -1, None, "x", [1], 10**400):
             self.assertIsNone(tx.as_duration(bad))
+
+    def test_result_line_is_always_three_fields(self):
+        line = tx.format_result(tx.Result("x", "FAIL", error="tool failed:\tbad\nthing"))
+        self.assertEqual(line.split("\t"), ["FAIL", "-", "tool failed: bad thing"])
+        self.assertNotIn("\n", line)
 
 
 class Publish(unittest.TestCase):
@@ -273,9 +295,14 @@ class CLI(unittest.TestCase):
         self.assertIn("unexpected metadata", result[0].detail)
 
     def test_invalid_duration_is_omitted(self):
-        proc = self.run_cli(URL, env=self.env(FAKE_META=self.write_meta(duration="NaN")))
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertNotIn("duration:", Path(rows(proc.stdout)[0].detail).read_text())
+        for duration in ("NaN", 10**400):
+            with self.subTest(duration=str(duration)[:10]):
+                shutil.rmtree(self.out, ignore_errors=True)
+                env = self.env(FAKE_META=self.write_meta(duration=duration))
+                proc = self.run_cli(URL, str(self.media), env=env)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual([r.status for r in rows(proc.stdout)], ["OK", "OK"])
+                self.assertNotIn("duration:", Path(rows(proc.stdout)[0].detail).read_text())
 
     def test_batch_isolates_missing_input(self):
         proc = self.run_cli(URL, str(self.tmp / "missing.mp4"), str(self.media))
@@ -367,7 +394,8 @@ class CLI(unittest.TestCase):
         proc = self.run_cli(str(self.media), env=self.env(FAKE_CURL_FAIL="1"))
         self.assertEqual(proc.returncode, 2)
         self.assertIn("model download failed", proc.stderr)
-        curl_out = Path(self.calls("curl")[0]["argv"][-2])
+        curl_argv = self.calls("curl")[0]["argv"]
+        curl_out = Path(curl_argv[curl_argv.index("-o") + 1])
         self.assertTrue(curl_out.name.endswith(".part"))
         self.assertFalse(curl_out.exists())
         self.assertEqual(list((self.cache / "transcribe" / "models").glob("*")), [])
@@ -401,9 +429,11 @@ class InProcess(unittest.TestCase):
                 raise OSError("injected rename failure")
             return real(src, dst)
 
-        env = {"PATH": str(bin_dir), "XDG_CACHE_HOME": str(tmp / "cache")}
+        env = {"PATH": str(bin_dir), "XDG_CACHE_HOME": str(tmp / "cache"), "HOME": str(tmp),
+               "TMPDIR": tempfile.gettempdir()}
         stdout = io.StringIO()
-        with mock.patch.dict(os.environ, env), mock.patch.object(tx.os, "replace", failing_once), \
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(tx.os, "replace", failing_once), \
                 redirect_stdout(stdout), redirect_stderr(io.StringIO()):
             code = tx.main(["-o", str(out), str(first), str(second)])
         result = rows(stdout.getvalue())

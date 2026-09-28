@@ -20,7 +20,7 @@ Pass every URL and file path the user gave (expand folders and globs to media fi
 ${CLAUDE_SKILL_DIR}/scripts/transcribe.py -o transcripts <url-or-file> ...
 ```
 
-Run it exactly in this form, with the script path unquoted and first: that is the form the skill pre-approves.
+Run it exactly in this form, with the script path unquoted and first: that is the form the skill pre-approves. Only if the path contains spaces, quote it (Claude Code will then ask permission once).
 
 - Output directory: the user's choice, else `./transcripts`.
 - `--lang <code>` when the user states the spoken language; the default `auto` detects it.
