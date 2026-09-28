@@ -31,7 +31,7 @@ Run it exactly in this form, with the script path unquoted and first: that is th
 
 stdout has one line per input: `OK|SKIP|FAIL <tab> <how> <tab> <.txt path or error>`.
 
-- Exit 2 means a dependency is missing: show the user the install command from the message. Do not install anything without asking.
+- Exit 2 means the run couldn't start (missing dependency, model download failure, unwritable output directory). Relay the message; when it includes install commands, show them. Do not install anything without asking.
 - A `FAIL` from yt-dlp often means the site changed: suggest updating yt-dlp.
 - Other `FAIL`s affect only that input; report them and carry on with the rest.
 

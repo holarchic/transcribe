@@ -54,7 +54,7 @@ skills/transcribe/scripts/transcribe.py [-o DIR] [--model NAME|PATH] [--lang COD
   --force    redo inputs that already have a transcript
 ```
 
-It prints one line per input, `OK|SKIP|FAIL <tab> how <tab> path-or-error`, and exits 0 when nothing failed, 1 when an input failed, and 2 when a dependency is missing.
+It prints one line per input, `OK|SKIP|FAIL <tab> how <tab> path-or-error`, and exits 0 when nothing failed, 1 when an input failed, and 2 when it couldn't start (a missing dependency, a model that failed to download, an output directory it can't create).
 
 Each `.txt` starts with a header, then the text:
 
@@ -76,6 +76,7 @@ All right, so here we are, in front of the elephants
 - **Human subtitles only.** YouTube's auto-generated captions are ignored (no punctuation, repeated lines); those videos go through whisper.cpp. Subtitles are used when their language matches the video's (or `--lang`).
 - **One video per URL.** Playlist URLs are rejected; a watch URL with a `list=` parameter takes just that video.
 - **Your yt-dlp config file is ignored** (`--ignore-config`), so outputs are predictable. Cookies and proxies set there don't apply.
+- **One run at a time** per output directory. Two runs writing the same directory (or downloading the model) at once aren't supported.
 - If YouTube downloads start failing, update yt-dlp first.
 
 ## Not included

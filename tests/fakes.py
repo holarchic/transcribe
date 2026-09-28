@@ -9,6 +9,8 @@ import os
 import sys
 from pathlib import Path
 
+__all__ = ["GOOD_SRT", "TOOLS", "make_bin"]
+
 GOOD_SRT = """1
 00:00:00,000 --> 00:00:02,000
 Hello from the fake.
@@ -78,6 +80,7 @@ else:
 ''',
     "curl": r'''
 if os.environ.get("FAKE_CURL_FAIL"):
+    Path(opt("-o")).write_bytes(b"partial")  # a real failed transfer leaves a partial file
     sys.stderr.write("curl: (22) The requested URL returned error: 404\n"); sys.exit(22)
 Path(opt("-o")).write_bytes(b"fake-model")
 ''',

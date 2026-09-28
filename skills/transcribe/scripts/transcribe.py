@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -19,6 +20,7 @@ import tempfile
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 DEFAULT_MODEL = "large-v3-turbo-q5_0"
 MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{name}.bin"
@@ -49,7 +51,7 @@ class PreflightError(Exception):
 @dataclass(frozen=True)
 class Source:
     raw: str
-    kind: str  # "url" | "file"
+    kind: Literal["url", "file"]
 
 
 @dataclass(frozen=True)
@@ -58,10 +60,9 @@ class Meta:
     channel: str | None
     date: str | None
     duration_s: float | None
-    source: str
-    stem_id: str
+    source: str  # canonical URL or absolute path; also the input's identity
     language: str | None
-    subtitle_langs: tuple
+    subtitle_langs: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -72,11 +73,18 @@ class Cue:
 
 
 @dataclass(frozen=True)
+class Provenance:
+    kind: Literal["subtitles", "whisper"]
+    detail: str  # subtitle language or model name
+
+
+@dataclass(frozen=True)
 class Result:
     input: str
-    status: str  # "OK" | "SKIP" | "FAIL"
-    how: str
-    detail: str
+    status: Literal["OK", "SKIP", "FAIL"]
+    provenance: Provenance | None = None
+    txt_path: Path | None = None
+    error: str | None = None
 
 
 def install_hint(tool: str) -> str:
@@ -84,7 +92,16 @@ def install_hint(tool: str) -> str:
     return INSTALL_HINTS[tool][platform]
 
 
-def run(cmd: list) -> subprocess.CompletedProcess:
+def redact(text: str) -> str:
+    """Hide credentials embedded in URLs (scheme://user:pass@host)."""
+    return re.sub(r"([a-z][a-z0-9+.-]*://)[^/\s@]+@", r"\1***@", text, flags=re.IGNORECASE)
+
+
+def progress(tag: str, stage: str, stem: str) -> None:
+    print(f"{tag} {stage} {stem}", file=sys.stderr)
+
+
+def run(cmd: list[str]) -> subprocess.CompletedProcess:
     tool = cmd[0]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", check=False)
@@ -92,7 +109,7 @@ def run(cmd: list) -> subprocess.CompletedProcess:
         raise InputError(f"{tool} could not run: {e}") from e
     if proc.returncode != 0:
         lines = proc.stderr.strip().splitlines()
-        reason = lines[-1] if lines else f"exit {proc.returncode}"
+        reason = redact(lines[-1]) if lines else f"exit {proc.returncode}"
         suffix = " (if the site changed, update yt-dlp)" if tool == "yt-dlp" else ""
         raise InputError(f"{tool} failed: {reason}{suffix}")
     return proc
@@ -103,12 +120,16 @@ def classify(raw: str) -> Source:
         return Source(raw, "url")
     if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", raw):
         raise InputError("unsupported scheme (only http and https URLs)")
-    if Path(raw).expanduser().is_file():
+    try:
+        is_file = Path(raw).expanduser().is_file()
+    except OSError as e:
+        raise InputError(f"cannot access: {e}") from e
+    if is_file:
         return Source(raw, "file")
     raise InputError("not found")
 
 
-def preflight(sources: list, model_arg: str) -> Path:
+def preflight(sources: list[Source], model_arg: str) -> Path:
     needed = ["ffmpeg", "ffprobe", "whisper-cli"]
     if any(s.kind == "url" for s in sources):
         needed.append("yt-dlp")
@@ -116,7 +137,10 @@ def preflight(sources: list, model_arg: str) -> Path:
     if missing:
         lines = [f"  {tool}: {install_hint(tool)}" for tool in missing]
         raise PreflightError("missing dependencies:\n" + "\n".join(lines))
-    return resolve_model(model_arg)
+    try:
+        return resolve_model(model_arg)
+    except OSError as e:
+        raise PreflightError(f"model cache error: {e}") from e
 
 
 def cache_dir() -> Path:
@@ -150,8 +174,6 @@ def download_model(name: str, dest: Path) -> None:
         if code != 0:
             raise PreflightError(f"model download failed (curl exit {code}): {url}")
         os.replace(part, dest)
-    except OSError as e:
-        raise PreflightError(f"model cache error: {e}") from e
     finally:
         remove_quietly(part)
 
@@ -163,6 +185,18 @@ def remove_quietly(path: Path) -> None:
         pass
 
 
+def as_duration(value: object) -> float | None:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None
+
+
+def as_text(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
 def probe_url(url: str) -> Meta:
     proc = run(["yt-dlp", "--ignore-config", "-J", "--flat-playlist", "--no-playlist",
                 "--no-warnings", url])
@@ -170,18 +204,21 @@ def probe_url(url: str) -> Meta:
         info = json.loads(proc.stdout)
     except json.JSONDecodeError as e:
         raise InputError("yt-dlp returned unreadable metadata") from e
+    if not isinstance(info, dict):
+        raise InputError("yt-dlp returned unexpected metadata")
     if info.get("_type") == "playlist":
         raise InputError("playlist URLs are not supported; pass video URLs")
-    langs = tuple(sorted(k for k in (info.get("subtitles") or {}) if k != "live_chat"))
-    upload = info.get("upload_date")
+    subs = info.get("subtitles")
+    langs = tuple(sorted(k for k in subs if k != "live_chat")) if isinstance(subs, dict) else ()
+    upload = as_text(info.get("upload_date"))
+    date = f"{upload[:4]}-{upload[4:6]}-{upload[6:8]}" if upload and len(upload) == 8 else None
     return Meta(
-        title=info.get("title") or info.get("id") or "untitled",
-        channel=info.get("channel") or info.get("uploader"),
-        date=f"{upload[:4]}-{upload[4:6]}-{upload[6:8]}" if upload and len(upload) == 8 else None,
-        duration_s=_as_float(info.get("duration")),
-        source=info.get("webpage_url") or url,
-        stem_id=str(info.get("id") or hashlib.sha1(url.encode()).hexdigest()[:8]),
-        language=info.get("language"),
+        title=as_text(info.get("title")) or as_text(info.get("id")) or "untitled",
+        channel=as_text(info.get("channel")) or as_text(info.get("uploader")),
+        date=date,
+        duration_s=as_duration(info.get("duration")),
+        source=as_text(info.get("webpage_url")) or url,
+        language=as_text(info.get("language")),
         subtitle_langs=langs,
     )
 
@@ -190,32 +227,30 @@ def probe_file(path: Path) -> Meta:
     proc = run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json",
                 str(path)])
     try:
-        duration = json.loads(proc.stdout).get("format", {}).get("duration")
+        fmt = json.loads(proc.stdout).get("format")
     except (json.JSONDecodeError, AttributeError):
-        duration = None
+        fmt = None
     return Meta(
         title=path.stem,
         channel=None,
         date=None,
-        duration_s=_as_float(duration),
+        duration_s=as_duration(fmt.get("duration")) if isinstance(fmt, dict) else None,
         source=str(path),
-        stem_id=hashlib.sha1(str(path).encode()).hexdigest()[:8],
         language=None,
         subtitle_langs=(),
     )
 
 
-def _as_float(value: object) -> float | None:
-    try:
-        return float(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
 def stem_for(meta: Meta) -> str:
+    """Readable slug of the title plus a hash of the input's identity.
+
+    Site-supplied ids are neither unique across sites nor filename-safe, so the
+    canonical URL / absolute path is hashed instead.
+    """
     ascii_title = unicodedata.normalize("NFKD", meta.title).encode("ascii", "ignore").decode()
     slug = re.sub(r"[^a-z0-9]+", "-", ascii_title.lower()).strip("-")[:60].rstrip("-")
-    return f"{slug}-{meta.stem_id}" if slug else meta.stem_id
+    digest = hashlib.sha1(meta.source.encode()).hexdigest()[:8]
+    return f"{slug}-{digest}" if slug else digest
 
 
 def pick_subtitle_lang(meta: Meta, lang_arg: str) -> str | None:
@@ -268,29 +303,46 @@ def transcribe_wav(wav: Path, model: Path, lang: str, tmp: Path) -> str:
     return srt.read_text(encoding="utf-8", errors="replace")
 
 
-_TIMING = re.compile(r"^\s*(\S+)\s*-->\s*(\S+)")
+_TS = r"\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}"
+_TIMING = re.compile(rf"^\s*({_TS})\s*-->\s*({_TS})(\s.*)?$")
+_TIMING_SHAPE = re.compile(r"^\s*\S+\s*-->\s*\S+")
 
 
-def parse_srt(text: str) -> list:
-    cues = []
-    normalized = text.lstrip("﻿").replace("\r\n", "\n").strip()
-    if not normalized:
-        return cues
-    for block in re.split(r"\n\s*\n", normalized):
-        lines = block.splitlines()
-        timing_at = next((i for i, line in enumerate(lines) if _TIMING.match(line)), None)
-        if timing_at is None:
-            raise InputError("malformed subtitles: block without a timing line")
-        start, end = _TIMING.match(lines[timing_at]).groups()
-        body = re.sub(r"<[^>]+>", "", " ".join(lines[timing_at + 1:]))
-        body = " ".join(body.split())
-        if body:
-            cues.append(Cue(start, end, body))
+def parse_srt(text: str) -> list[Cue]:
+    """Cue boundaries are timing lines, not blank lines: ffmpeg-converted subtitles can
+    carry blank lines inside a cue. A bare number right before a timing line is an index."""
+    cues: list[Cue] = []
+    start = end = None
+    body: list[str] = []
+    for line in text.lstrip("﻿").replace("\r\n", "\n").split("\n"):
+        if _TIMING_SHAPE.match(line):
+            timing = _TIMING.match(line)
+            if timing is None:
+                raise InputError(f"malformed subtitles: bad timing line {line.strip()[:40]!r}")
+            if body and body[-1].strip().isdigit():
+                body.pop()
+            if start is None and body:
+                raise InputError("malformed subtitles: text before the first timing line")
+            _append_cue(cues, start, end, body)
+            start, end, body = timing.group(1), timing.group(2), []
+        elif line.strip():
+            body.append(line)
+    if start is None and body:
+        raise InputError("malformed subtitles: no timing lines")
+    _append_cue(cues, start, end, body)
     return cues
 
 
-def cue_lines(cues: list) -> list:
-    lines = []
+def _append_cue(cues: list[Cue], start: str | None, end: str | None, body: list[str]) -> None:
+    if start is None or end is None:
+        return
+    text = " ".join(re.sub(r"<[^>]+>", "", " ".join(body)).split())
+    if text:
+        cues.append(Cue(start, end, text))
+
+
+def cue_lines(cues: list[Cue]) -> list[str]:
+    lines: list[str] = []
     for cue in cues:
         if not lines or lines[-1] != cue.text:
             lines.append(cue.text)
@@ -304,7 +356,11 @@ def format_duration(seconds: float) -> str:
     return f"{hours}h{minutes:02d}m{secs:02d}s" if hours else f"{minutes}m{secs:02d}s"
 
 
-def render_txt(meta: Meta, how: str, lines: list) -> str:
+def format_provenance(prov: Provenance | None) -> str:
+    return f"{prov.kind}:{prov.detail}" if prov else "-"
+
+
+def render_txt(meta: Meta, prov: Provenance, lines: list[str]) -> str:
     header = [f"title: {meta.title}"]
     if meta.channel:
         header.append(f"channel: {meta.channel}")
@@ -312,15 +368,20 @@ def render_txt(meta: Meta, how: str, lines: list) -> str:
         header.append(f"date: {meta.date}")
     if meta.duration_s is not None:
         header.append(f"duration: {format_duration(meta.duration_s)}")
-    header += [f"source: {meta.source}", f"transcript: {how}", "---"]
+    header += [f"source: {redact(meta.source)}", f"transcript: {format_provenance(prov)}", "---"]
     return "\n".join(header + lines) + "\n"
+
+
+def format_result(result: Result) -> str:
+    detail = str(result.txt_path) if result.txt_path else (result.error or "")
+    return f"{result.status}\t{format_provenance(result.provenance)}\t{detail}"
 
 
 def publish(out: Path, stem: str, srt: str, txt: str) -> None:
     """Replace <stem>.srt/.txt so that a present .txt always means a complete, matching pair.
 
     Both files are staged first; the old .txt (the completion marker) is removed before
-    the .srt is replaced, and the new .txt lands last.
+    the .srt is replaced, and the new .txt lands last. Assumes a single writer per <out>.
     """
     srt_tmp, txt_tmp = out / f".{stem}.srt.tmp", out / f".{stem}.txt.tmp"
     try:
@@ -347,35 +408,35 @@ def _process(source: Source, args: argparse.Namespace, model: Path, tag: str) ->
     stem = stem_for(meta)
     txt_path = args.out / f"{stem}.txt"
     if txt_path.exists() and not args.force:
-        return Result(source.raw, "SKIP", "-", str(txt_path))
+        return Result(source.raw, "SKIP", txt_path=txt_path)
     with tempfile.TemporaryDirectory(prefix="transcribe-") as tmp_name:
         tmp = Path(tmp_name)
         lang = pick_subtitle_lang(meta, args.lang) if is_url else None
         if lang:
-            print(f"{tag} subtitles:{lang} {stem}", file=sys.stderr)
-            srt, how = fetch_subtitles(source.raw, lang, tmp), f"subtitles:{lang}"
+            progress(tag, f"subtitles:{lang}", stem)
+            srt, prov = fetch_subtitles(source.raw, lang, tmp), Provenance("subtitles", lang)
         else:
             if is_url:
-                print(f"{tag} download {stem}", file=sys.stderr)
+                progress(tag, "download", stem)
             media = fetch_audio(source.raw, tmp) if is_url else Path(meta.source)
-            print(f"{tag} whisper {stem}", file=sys.stderr)
+            progress(tag, "whisper", stem)
             srt = transcribe_wav(to_wav(media, tmp), model, args.lang, tmp)
-            how = f"whisper:{model.stem.replace('ggml-', '', 1)}"
+            prov = Provenance("whisper", model.stem.replace("ggml-", "", 1))
     lines = cue_lines(parse_srt(srt))
     if not lines:
         raise InputError("empty transcript (no speech detected)")
-    publish(args.out, stem, srt, render_txt(meta, how, lines))
-    return Result(source.raw, "OK", how, str(txt_path))
+    publish(args.out, stem, srt, render_txt(meta, prov, lines))
+    return Result(source.raw, "OK", provenance=prov, txt_path=txt_path)
 
 
 def classify_or_fail(raw: str) -> Source | Result:
     try:
         return classify(raw)
     except InputError as e:
-        return Result(raw, "FAIL", "-", str(e))
+        return Result(raw, "FAIL", error=str(e))
 
 
-def parse_args(argv: list) -> argparse.Namespace:
+def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("inputs", nargs="+", metavar="INPUT", help="URL or local media file")
     parser.add_argument("-o", "--out", type=Path, default=Path("transcripts"),
@@ -387,7 +448,7 @@ def parse_args(argv: list) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list) -> int:
+def main(argv: list[str]) -> int:
     args = parse_args(argv)
     items = [classify_or_fail(raw) for raw in args.inputs]
     try:
@@ -408,9 +469,9 @@ def main(argv: list) -> int:
         try:
             results.append(process(item, args, model, f"[{n}/{len(items)}]"))
         except InputError as e:
-            results.append(Result(item.raw, "FAIL", "-", str(e)))
-    for r in results:
-        print(f"{r.status}\t{r.how}\t{r.detail}")
+            results.append(Result(item.raw, "FAIL", error=str(e)))
+    for result in results:
+        print(format_result(result))
     return 1 if any(r.status == "FAIL" for r in results) else 0
 
 
