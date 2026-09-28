@@ -54,6 +54,8 @@ skills/transcribe/scripts/transcribe.py [-o DIR] [--model NAME|PATH] [--lang COD
   --force    redo inputs that already have a transcript
 ```
 
+Quote URLs: `?` and `&` are special to the shell, and zsh stops with "no matches found" on an unquoted YouTube link.
+
 It prints one line per input, `OK|SKIP|FAIL <tab> how <tab> path-or-error`, and exits 0 when nothing failed, 1 when an input failed, and 2 when it couldn't start (a missing dependency, a model that failed to download, an output directory it can't create).
 
 Each `.txt` starts with a header, then the text:

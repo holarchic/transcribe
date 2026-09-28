@@ -17,10 +17,10 @@ The script is `scripts/transcribe.py` in this skill's directory. In Claude Code 
 Pass every URL and file path the user gave (expand folders and globs to media files yourself):
 
 ```bash
-${CLAUDE_SKILL_DIR}/scripts/transcribe.py -o transcripts <url-or-file> ...
+${CLAUDE_SKILL_DIR}/scripts/transcribe.py -o transcripts 'https://www.youtube.com/watch?v=ID' '/path/to/file.mp4' ...
 ```
 
-Run it exactly in this form, with the script path unquoted and first: that is the form the skill pre-approves. Only if the path contains spaces, quote it (Claude Code will then ask permission once).
+Run it exactly in this form: the script path unquoted and first (the form the skill pre-approves), and every URL and file path in single quotes — unquoted, the `?` and `&` in URLs are shell glob and control characters, and zsh aborts with "no matches found". Only if the script path contains spaces, quote it too (Claude Code will then ask permission once).
 
 - Output directory: the user's choice, else `./transcripts`.
 - `--lang <code>` when the user states the spoken language; the default `auto` detects it.
