@@ -1,0 +1,15 @@
+[project]
+name = "transcribe"
+version = "0.1.0"
+description = "Agent skill: batch video/audio URLs or files to local transcripts (subtitles, else whisper.cpp)"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "PLW", "RUF"]
