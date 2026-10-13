@@ -10,6 +10,10 @@ Give it YouTube links (or anything [yt-dlp](https://github.com/yt-dlp/yt-dlp) su
 
 No API keys, no cloud transcription, and no Python packages to install.
 
+## Attribution
+
+For those who care about such things, the majority of the code in this repo was produced by Claude Opus 5.5 (Anthropic), with david guiding Claude, providing insights, direction and critical review throughout the process.
+
 ## Requirements
 
 - Python 3.9+
