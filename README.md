@@ -5,7 +5,7 @@
 
 Local video transcription skill for Claude Code and Agent Skills: human subtitles via yt-dlp, else whisper.cpp.
 
-> **Status:** v0.1.0, in use and actively maintained since September 2026. The command line and output formats are stable.
+> **Status:** v0.1.0, actively maintained and in use since September 2026. 39 tests, including a real whisper.cpp integration test (local only; CI uses fakes).
 
 ```console
 $ skills/transcribe/scripts/transcribe.py --lang en 'https://www.youtube.com/watch?v=jNQXAC9IVRw'
