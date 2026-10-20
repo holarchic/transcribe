@@ -118,7 +118,7 @@ Each `.txt` starts with a header (title, channel, upload date, duration, source,
 
 ## Contributing
 
-Bug reports and fixes are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers setup and pull requests. [SPEC.md](SPEC.md) is the design contract (decisions, acceptance criteria, failure modes).
+Bug reports and fixes are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers setup and pull requests. [ARCHITECTURE.md](ARCHITECTURE.md) maps the code: the pipeline, its error types and the test fakes.
 
 ## Attribution
 
