@@ -1,6 +1,6 @@
 # Contributing
 
-Bug reports and fixes are welcome. For anything bigger than a small fix, open an issue first so we can agree the approach before you build it. [SPEC.md](SPEC.md) is the design contract (non-goals and decisions), so a change that crosses it starts there.
+Bug reports and fixes are welcome. For anything bigger than a small fix, open an issue first so we can agree the approach before you build it. The Rules below are the design limits, so a change that crosses one starts there. [ARCHITECTURE.md](ARCHITECTURE.md) maps the code.
 
 ## Setup
 
@@ -24,7 +24,7 @@ claude plugin validate --strict .    # needs Claude Code
 
 - One concern per PR, with tests. `tests/fakes.py` sets each fake tool's behaviour through `FAKE_*` environment variables.
 - The tests and ruff pass.
-- A behaviour change updates README.md and SPEC.md in the same PR.
+- A behaviour change updates README.md in the same PR, and a structural change updates ARCHITECTURE.md.
 - Say what changed and how you verified it.
 
 ## Bug reports
